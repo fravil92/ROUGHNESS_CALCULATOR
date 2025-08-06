@@ -1,19 +1,18 @@
-# 🎈 Blank app template
+# 🎈 ROUGHNESS CALCULATOR
 
-A simple Streamlit app template for you to modify!
+**New Advanced Features:**
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+    🎯 **ROI Selection**: Define rectangular regions of interest for targeted analysis
 
-### How to run it on your own machine
+    📏 **Interactive Scale Calibration**: Set scale by measuring pixel distances between reference lines
 
-1. Install the requirements
+    🎨 **Advanced Image Processing**: Enhanced contrast controls and preprocessing within selected regions
 
-   ```
-   $ pip install -r requirements.txt
-   ```
+    📊 **Multi-Region Analysis**: Process multiple regions with different parameters
 
-2. Run the app
-
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+    **Workflow:**
+    1. **Upload & Calibrate**: Load SEM image and set scale using reference markers
+    2. **Region Selection**: Define rectangular ROI for analysis
+    3. **Image Enhancement**: Apply contrast and threshold adjustments to ROI
+    4. **Edge Detection**: Extract sidewall profile from processed region
+    5. **Analysis & Export**: Calculate roughness metrics and export results
