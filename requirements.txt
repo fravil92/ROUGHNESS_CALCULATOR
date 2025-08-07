@@ -4,3 +4,4 @@ matplotlib
 scikit-image
 scipy
 Pillow
+openai
