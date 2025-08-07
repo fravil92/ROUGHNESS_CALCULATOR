@@ -107,16 +107,28 @@ with st.expander("📖 About This Enhanced Tool", expanded=False):
 # Sidebar for parameters
 st.sidebar.markdown("## 🔧 Analysis Parameters")
 
-# File upload
-uploaded_file = st.sidebar.file_uploader(
-    "Upload Image",
-    type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
-    help="For example: upload a SEM image of the etched sidewall"
-)
-use_example = st.sidebar.checkbox("Use Example Image", value=False, help="Try with a real SEM image example")
+EXAMPLE_IMAGE_PATH = "example.png"  # adjust path if needed
 
-if not uploaded_file and use_example:
-    uploaded_file = "example.png"
+st.sidebar.markdown("## Upload or Try Example")
+uploaded_file = st.sidebar.file_uploader(
+    "Upload SEM Image",
+    type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+)
+use_example = st.sidebar.checkbox("Try Example Image", value=False)
+
+if use_example and not uploaded_file:
+    uploaded_file = EXAMPLE_IMAGE_PATH
+    st.session_state["used_example"] = True
+else:
+    st.session_state["used_example"] = False
+
+if uploaded_file:
+    if isinstance(uploaded_file, str):
+        image = Image.open(uploaded_file)
+    else:
+        image = Image.open(uploaded_file)
+    st.image(image, caption="Loaded SEM Image", width=400)
+
 
 def get_ai_interpretation(prompt, model="openai/gpt-4o"):
     # Get key
