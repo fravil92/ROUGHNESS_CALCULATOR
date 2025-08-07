@@ -939,10 +939,10 @@ if uploaded_file is not None:
             fft_results['dominant_period']) else "Dominant periodicity: Not available",
         f"Profile points: {len(profile_nm)}",
         f"Profile analysis length: {physical_length:.2f} μm",
-        "Context: This is sidewall roughness analysis from SEM images for photonic waveguide fabrication."
+        "Context: This is sidewall profile roughness analysis from SEM images for microfabrication (etching)."
     ]
     prompt = "\n".join(prompt_lines)
-    prompt += "\n\nPlease provide a concise, expert interpretation of these measurements, including what they mean about the fabrication quality, any likely causes for observed values, and any suggestions for improvement. Write your answer in English, suitable for a scientific report."
+    prompt += "\n\nPlease provide a concise, expert interpretation of these measurements, including what they mean about the fabrication quality, any likely causes for observed values, and any suggestions for improvement. Write your answer in English, suitable for a scientific report. Provide also a LaTeX code with the summary of the results, suitable for a scientific report"
 
     # --- UI logic ---
     st.markdown("---")
