@@ -1,7 +1,8 @@
-streamlit
-numpy
-matplotlib
-scikit-image
-scipy
-Pillow
-openai
+streamlit>=1.29
+streamlit-drawable-canvas>=0.9.3
+numpy>=2.0
+scipy>=1.11
+matplotlib>=3.8
+scikit-image>=0.22
+Pillow>=10.0
+openai>=1.6.0
