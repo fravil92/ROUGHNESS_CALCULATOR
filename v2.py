@@ -14,7 +14,17 @@ from skimage.morphology import remove_small_objects, binary_closing, disk
 from skimage.measure import label, regionprops
 import os
 import openai
+import zipfile
+import io
+from PIL import Image as PILImage
+import base64
 
+# Optional interactive canvas for dragging lines
+try:
+    from streamlit_drawable_canvas import st_canvas  # type: ignore
+    HAS_DRAWABLE_CANVAS = True
+except Exception:
+    HAS_DRAWABLE_CANVAS = False
 
 
 # Set page config
@@ -107,6 +117,16 @@ with st.expander("📖 About This Enhanced Tool", expanded=False):
 # Sidebar for parameters
 st.sidebar.markdown("## 🔧 Analysis Parameters")
 
+try:
+    # Follow Streamlit theme for matplotlib only; do not override Streamlit CSS
+    theme_base = st.get_option("theme.base")
+    if str(theme_base).lower() == "dark":
+        plt.style.use("dark_background")
+    else:
+        plt.style.use("default")
+except Exception:
+    pass
+
 EXAMPLE_IMAGE_PATH = "example.png"  # adjust path if needed
 
 st.sidebar.markdown("## Upload or Try Example")
@@ -144,7 +164,8 @@ def get_ai_interpretation(prompt, model="openai/gpt-4o"):
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are an expert scientific assistant who can analyze and comment on sidewall roughness measurement results, explaining their meaning and suggesting possible improvements or interpretations for research and engineering."},
+                {"role": "system",
+                 "content": "You are an expert scientific assistant who can analyze and comment on sidewall roughness measurement results, explaining their meaning and suggesting possible improvements or interpretations for research and engineering."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
@@ -203,9 +224,21 @@ def create_scale_calibration_plot(img_array, line1_x=100, line2_x=200):
     ax.set_xlabel('X (pixels)')
     ax.set_ylabel('Y (pixels)')
     ax.legend()
-    ax.grid(True, alpha=0.3)
+
+    # Detailed axis scale: major ticks every 25 pixels (+ minor grid)
+    from matplotlib.ticker import MultipleLocator
+    height, width = img_array.shape[0], img_array.shape[1]
+    major_step = 50
+    ax.xaxis.set_major_locator(MultipleLocator(major_step))
+    ax.yaxis.set_major_locator(MultipleLocator(major_step))
+    ax.minorticks_on()
+    ax.grid(which='major', color='gray', alpha=0.3)
+    ax.grid(which='minor', color='gray', alpha=0.15)
+    # Rotate x-axis tick labels by 90 degrees for readability
+    ax.tick_params(axis='x', labelrotation=90)
 
     return fig, ax
+
 
 def set_roi(x0, y0, x1, y1):
     st.session_state["roi_x0"] = x0
@@ -214,6 +247,7 @@ def set_roi(x0, y0, x1, y1):
     st.session_state["roi_y1"] = y1
     st.session_state.roi_coords = (x0, y0, x1, y1)
     st.rerun()
+
 
 def process_roi_image_enhanced(img_array, roi_coords, contrast_factor=1.0, brightness=0.0, threshold=0.5,
                                island_removal_params=None, morphology_params=None):
@@ -275,6 +309,7 @@ def process_roi_image_enhanced(img_array, roi_coords, contrast_factor=1.0, brigh
         }
     }
 
+
 def extract_edge_profile_from_roi_enhanced(processed_roi, edge_side='right', find_main_structure=True):
     """Enhanced edge profile extraction that uses the cleaned binary image"""
     from skimage.measure import label, regionprops
@@ -319,6 +354,7 @@ def extract_edge_profile_from_roi_enhanced(processed_roi, edge_side='right', fin
     if len(profile) == 0:
         return None, None
     return np.array(profile), np.array(y_coords)
+
 
 def suggest_processing_parameters(img_array, roi_coords=None):
     if roi_coords is None:
@@ -443,8 +479,6 @@ if uploaded_file is not None:
     img_array = np.array(image)
     if use_example and isinstance(uploaded_file, str):
         st.info("Example SEM image loaded. Try the workflow or upload your own image in the sidebar.")
-    # ...rest of app logic...
-
 
     st.session_state.image_loaded = True
     st.session_state.image_height = img_array.shape[0]
@@ -466,47 +500,165 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns([3, 1])
 
+        # Left: interactive dragging on top of the image (if available)
         with col1:
-            # Manual coordinate input first (for creating the plot)
+            if HAS_DRAWABLE_CANVAS:
+                st.markdown("### Drag the reference lines")
+                enable_drag = st.checkbox("Enable interactive dragging", value=True, key="enable_drag_calibration")
+                if enable_drag:
+                    img_width = st.session_state.image_width
+                    img_height = st.session_state.image_height
+                    canvas_width = min(900, img_width)
+                    scale_factor = canvas_width / float(img_width)
+                    canvas_height = int(img_height * scale_factor)
+
+                    # Initialize default line positions if not present
+                    l1_default = int(st.session_state.get("line1_x", 100))
+                    l2_default = int(st.session_state.get("line2_x", 200))
+
+                    # Prepare background as an image object (Fabric.js) inside initial_drawing
+                    bg_img = PILImage.fromarray(img_array)
+                    bg_img = bg_img.resize((canvas_width, canvas_height))
+                    _buf = io.BytesIO()
+                    bg_img.save(_buf, format="PNG")
+                    _buf.seek(0)
+                    _data_url = "data:image/png;base64," + base64.b64encode(_buf.getvalue()).decode("utf-8")
+
+                    initial_drawing = {
+                        "objects": [
+                            {
+                                "type": "image",
+                                "left": 0,
+                                "top": 0,
+                                "width": canvas_width,
+                                "height": canvas_height,
+                                "src": _data_url,
+                                "selectable": False,
+                                "evented": False,
+                                "hasControls": False,
+                                "lockMovementX": True,
+                                "lockMovementY": True,
+                                "opacity": 1.0,
+                            },
+                            {
+                                "type": "rect",
+                                "left": l1_default * scale_factor - 1.5,
+                                "top": 0,
+                                "width": 3,
+                                "height": canvas_height,
+                                "fill": "rgba(255,0,0,0.6)",
+                                "stroke": "red",
+                                "strokeWidth": 0,
+                                "opacity": 0.8,
+                                "selectable": True,
+                                "hasControls": False,
+                                "lockMovementY": True,
+                                "lockScalingX": True,
+                                "lockScalingY": True,
+                                "lockRotation": True,
+                            },
+                            {
+                                "type": "rect",
+                                "left": l2_default * scale_factor - 1.5,
+                                "top": 0,
+                                "width": 3,
+                                "height": canvas_height,
+                                "fill": "rgba(0,0,255,0.6)",
+                                "stroke": "blue",
+                                "strokeWidth": 0,
+                                "opacity": 0.8,
+                                "selectable": True,
+                                "hasControls": False,
+                                "lockMovementY": True,
+                                "lockScalingX": True,
+                                "lockScalingY": True,
+                                "lockRotation": True,
+                            },
+                        ]
+                    }
+
+                    canvas_result = st_canvas(
+                        fill_color="rgba(255, 165, 0, 0.0)",
+                        stroke_width=2,
+                        stroke_color="red",
+                        background_image=None,
+                        update_streamlit=True,
+                        height=canvas_height,
+                        width=canvas_width,
+                        drawing_mode="transform",
+                        initial_drawing=initial_drawing,
+                        key="calibration_canvas",
+                    )
+
+                    # Show preview of positions; commit only on button click to avoid oscillation
+                    preview_l1 = int(st.session_state.get("line1_x", l1_default))
+                    preview_l2 = int(st.session_state.get("line2_x", l2_default))
+                    if canvas_result and canvas_result.json_data is not None and canvas_result.json_data.get("objects"):
+                        objects = canvas_result.json_data.get("objects", [])
+                        rects = [o for o in objects if o.get("type") == "rect"]
+                        if len(rects) >= 2:
+                            def rect_center_x_in_image(obj_dict):
+                                left = float(obj_dict.get("left", 0))
+                                width = float(obj_dict.get("width", 0))
+                                x_canvas = left + width / 2.0
+                                x_image = x_canvas / scale_factor
+                                return float(np.clip(x_image, 0, img_width - 1))
+
+                            centers = [rect_center_x_in_image(r) for r in rects[:2]]
+                            centers_sorted = sorted(centers)
+                            preview_l1 = int(centers_sorted[0])
+                            preview_l2 = int(centers_sorted[1])
+
+                    st.caption(f"Preview positions — Line 1: {preview_l1}px, Line 2: {preview_l2}px")
+                    if st.button("Apply positions", key="apply_calibration_lines"):
+                        st.session_state["line1_x"] = preview_l1
+                        st.session_state["line2_x"] = preview_l2
+                        st.rerun()
+            else:
+                st.info("Install 'streamlit-drawable-canvas' to enable draggable calibration lines.")
+
+        # Move all controls (reference lines + calibration) to the right
+        with col2:
             st.markdown("### Reference Line Positions")
 
             subcol1, subcol2 = st.columns(2)
             with subcol1:
-                line1_x = st.number_input("Line 1 - X coordinate", min_value=0,
-                                          max_value=st.session_state.image_width - 1, value=100, key="line1_x")
+                line1_x = st.number_input(
+                    "Line 1 - X coordinate",
+                    min_value=0,
+                    max_value=st.session_state.image_width - 1,
+                    value=100,
+                    key="line1_x",
+                )
             with subcol2:
-                line2_x = st.number_input("Line 2 - X coordinate", min_value=0,
-                                          max_value=st.session_state.image_width - 1, value=200, key="line2_x")
+                line2_x = st.number_input(
+                    "Line 2 - X coordinate",
+                    min_value=0,
+                    max_value=st.session_state.image_width - 1,
+                    value=200,
+                    key="line2_x",
+                )
 
-            # Create and display scale calibration plot
-            scale_fig, scale_ax = create_scale_calibration_plot(img_array, line1_x, line2_x)
-            st.pyplot(scale_fig)
-
-        with col2:
             st.markdown("### Calibration Settings")
 
-            # Known distance input
             known_distance = st.number_input(
                 "Known distance (nm)",
                 min_value=0.1,
                 max_value=100000.0,
                 value=st.session_state.known_distance,
                 step=0.1,
-                help="Physical distance between the reference lines"
+                help="Physical distance between the reference lines",
             )
             st.session_state.known_distance = known_distance
 
-            # Calculate scale
             pixel_distance = abs(line2_x - line1_x)
             if pixel_distance > 0:
                 calculated_scale = known_distance / pixel_distance
                 st.markdown(f"**Calculated Scale:** {calculated_scale:.3f} nm/pixel")
                 st.markdown(f"**Pixel Distance:** {pixel_distance} pixels")
 
-                # Store calculated scale
                 scale_nm_per_px = calculated_scale
 
-                # Additional info
                 st.markdown("---")
                 st.markdown("### 📊 Scale Information")
                 st.markdown(f"**Image Width:** {st.session_state.image_width} pixels")
@@ -514,8 +666,22 @@ if uploaded_file is not None:
                 st.markdown(f"**Image Height:** {st.session_state.image_height} pixels")
                 st.markdown(f"**Physical Height:** {st.session_state.image_height * calculated_scale / 1000:.1f} μm")
             else:
-                scale_nm_per_px = 11.11  # Default value
+                scale_nm_per_px = 11.11
                 st.warning("Please set different X coordinates for the reference lines.")
+
+        # Show the visualization on the left
+        with col1:
+            scale_fig, scale_ax = create_scale_calibration_plot(img_array, line1_x, line2_x)
+            st.pyplot(scale_fig)
+            _buf_scale = io.BytesIO()
+            scale_fig.savefig(_buf_scale, format="png", dpi=300, bbox_inches="tight")
+            _buf_scale.seek(0)
+            st.download_button(
+                label="⬇️ Download Calibration Plot (PNG)",
+                data=_buf_scale,
+                file_name="scale_calibration.png",
+                mime="image/png",
+            )
 
     # === TAB 2: ROI SELECTION ===
     with tab2:
@@ -525,6 +691,125 @@ if uploaded_file is not None:
         col1, col2 = st.columns([3, 1])
 
         with col1:
+            # Interactive ROI dragging (if available)
+            if HAS_DRAWABLE_CANVAS:
+                st.markdown("### Drag the ROI on the image")
+                st.caption("Tip: drag and modify the size of the red area directly on the picture.")
+                enable_drag_roi = st.checkbox("Enable interactive ROI dragging", value=st.session_state.get("enable_drag_roi", True), key="enable_drag_roi")
+                # Ensure a canvas version to force refresh when needed
+                if "roi_canvas_version" not in st.session_state:
+                    st.session_state["roi_canvas_version"] = 0
+                cols_roi_top = st.columns([1, 1, 2])
+                with cols_roi_top[0]:
+                    if st.button("Reset ROI Canvas", key="reset_roi_canvas"):
+                        st.session_state["roi_canvas_version"] += 1
+                        st.rerun()
+                if enable_drag_roi:
+                    img_width = st.session_state.image_width
+                    img_height = st.session_state.image_height
+                    canvas_width = min(900, img_width)
+                    scale_factor = canvas_width / float(img_width)
+                    canvas_height = int(img_height * scale_factor)
+
+                    # Session ROI defaults
+                    rx0 = int(st.session_state.get("roi_x0", 0))
+                    ry0 = int(st.session_state.get("roi_y0", 0))
+                    rx1 = int(st.session_state.get("roi_x1", min(500, img_width)))
+                    ry1 = int(st.session_state.get("roi_y1", min(500, img_height)))
+
+                    bg_img = PILImage.fromarray(img_array)
+                    bg_img = bg_img.resize((canvas_width, canvas_height))
+                    _buf_roi_bg = io.BytesIO()
+                    bg_img.save(_buf_roi_bg, format="PNG")
+                    _buf_roi_bg.seek(0)
+                    _bg_data_url = "data:image/png;base64," + base64.b64encode(_buf_roi_bg.getvalue()).decode("utf-8")
+
+                    initial_roi_drawing = {
+                        "objects": [
+                            {
+                                "type": "image",
+                                "left": 0,
+                                "top": 0,
+                                "width": canvas_width,
+                                "height": canvas_height,
+                                "src": _bg_data_url,
+                                "selectable": False,
+                                "evented": False,
+                                "hasControls": False,
+                                "lockMovementX": True,
+                                "lockMovementY": True,
+                                "opacity": 1.0,
+                            },
+                            {
+                                "type": "rect",
+                                "left": rx0 * scale_factor,
+                                "top": ry0 * scale_factor,
+                                "width": max(1, (rx1 - rx0) * scale_factor),
+                                "height": max(1, (ry1 - ry0) * scale_factor),
+                                "fill": "rgba(255,0,0,0.15)",
+                                "stroke": "red",
+                                "strokeWidth": 2,
+                                "selectable": True,
+                                "hasControls": True,
+                                "lockRotation": True,
+                            },
+                        ]
+                    }
+
+                    roi_canvas_result = st_canvas(
+                        fill_color="rgba(255, 165, 0, 0.0)",
+                        stroke_width=2,
+                        stroke_color="red",
+                        background_image=None,
+                        update_streamlit=True,
+                        height=canvas_height,
+                        width=canvas_width,
+                        drawing_mode="transform",
+                        initial_drawing=initial_roi_drawing,
+                        key=f"roi_canvas_{st.session_state['roi_canvas_version']}",
+                    )
+
+                    # Build preview values from current canvas objects
+                    preview_roi = (rx0, ry0, rx1, ry1)
+                    if roi_canvas_result and roi_canvas_result.json_data is not None:
+                        robjs = roi_canvas_result.json_data.get("objects", [])
+                        rects = [o for o in robjs if o.get("type") == "rect"]
+                        if len(rects) >= 1:
+                            r = rects[0]
+                            left = float(r.get("left", 0))
+                            top = float(r.get("top", 0))
+                            scale_x = float(r.get("scaleX", 1))
+                            scale_y = float(r.get("scaleY", 1))
+                            width_r = abs(float(r.get("width", 1)) * (scale_x if scale_x != 0 else 1))
+                            height_r = abs(float(r.get("height", 1)) * (scale_y if scale_y != 0 else 1))
+                            x0_img = int(np.clip(left / scale_factor, 0, img_width - 1))
+                            y0_img = int(np.clip(top / scale_factor, 0, img_height - 1))
+                            x1_img = int(np.clip((left + width_r) / scale_factor, 1, img_width))
+                            y1_img = int(np.clip((top + height_r) / scale_factor, 1, img_height))
+                            # Ensure ordering and minimum size 1px
+                            x0_img, x1_img = sorted([x0_img, x1_img])
+                            y0_img, y1_img = sorted([y0_img, y1_img])
+                            if x1_img <= x0_img:
+                                x1_img = min(img_width, x0_img + 1)
+                            if y1_img <= y0_img:
+                                y1_img = min(img_height, y0_img + 1)
+                            preview_roi = (x0_img, y0_img, x1_img, y1_img)
+
+                    prx0, pry0, prx1, pry1 = preview_roi
+                    st.caption(f"Preview ROI — x0:{prx0}, y0:{pry0}, x1:{prx1}, y1:{pry1}  (w:{prx1-prx0}, h:{pry1-pry0})")
+                    if st.button("Apply ROI", key="apply_roi_from_canvas"):
+                        # Update both underlying ROI state and the bound widget keys so they don't overwrite on rerun
+                        st.session_state["roi_x0"] = int(prx0)
+                        st.session_state["roi_y0"] = int(pry0)
+                        st.session_state["roi_x1"] = int(prx1)
+                        st.session_state["roi_y1"] = int(pry1)
+                        st.session_state["roi_x0_input"] = int(prx0)
+                        st.session_state["roi_y0_input"] = int(pry0)
+                        st.session_state["roi_x1_input"] = int(prx1)
+                        st.session_state["roi_y1_input"] = int(pry1)
+                        st.session_state.roi_coords = (int(prx0), int(pry0), int(prx1), int(pry1))
+                        st.rerun()
+
             # Manual ROI input
             st.markdown("### ROI Coordinates")
 
@@ -580,6 +865,16 @@ if uploaded_file is not None:
                         fontweight='bold', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
             st.pyplot(roi_fig)
+            # Download button for the ROI visualization
+            _buf_roi = io.BytesIO()
+            roi_fig.savefig(_buf_roi, format="png", dpi=300, bbox_inches="tight")
+            _buf_roi.seek(0)
+            st.download_button(
+                label="⬇️ Download ROI Preview (PNG)",
+                data=_buf_roi,
+                file_name="roi_preview.png",
+                mime="image/png"
+            )
 
         with col2:
             # ROI info
@@ -615,10 +910,46 @@ if uploaded_file is not None:
             if st.button("📐 Right Half"):
                 set_roi(w // 2, 0, w, h)
 
-    # === TAB 3: IMAGE PROCESSING ===
     # === TAB 3: ENHANCED IMAGE PROCESSING ===
     with tab3:
         st.markdown("## 🎨 Enhanced Image Processing with Island Filtering")
+
+        with st.expander("🎯 Parameter Optimization Assistant", expanded=True):
+            st.markdown("### Automatic Parameter Suggestions")
+            if st.button("🔍 Analyze Image & Suggest Parameters"):
+                suggestions = suggest_processing_parameters(img_array, roi_coords)
+                st.session_state.suggestions = suggestions
+
+            if "suggestions" in st.session_state:
+                s = st.session_state.suggestions
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Threshold:** {s['threshold']['value']:.3f}")
+                    st.markdown(f"*{s['threshold']['reasoning']}*")
+                    st.markdown(f"**Contrast Factor:** {s['contrast_factor']['value']:.2f}")
+                    st.markdown(f"*{s['contrast_factor']['reasoning']}*")
+                with col2:
+                    st.markdown(f"**Min Island Size:** {s['min_island_size']['value']}")
+                    st.markdown(f"*{s['min_island_size']['reasoning']}*")
+                    st.markdown(f"**Closing Radius:** {s['closing_radius']['value']}")
+                    st.markdown(f"*{s['closing_radius']['reasoning']}*")
+                # -- THE KEY: Set flag, rerun, actual update is above before widgets --
+                if st.button("✨ Apply Suggested Parameters"):
+                    st.session_state["apply_suggestions"] = True
+                    st.rerun()
+
+        # --- Apply AI Parameter Suggestions BEFORE widgets are created ---
+        if st.session_state.get("apply_suggestions", False):
+            s = st.session_state.get("suggestions", None)
+            if s:
+                st.session_state["threshold"] = float(s['threshold']['value'])
+                st.session_state["contrast_factor"] = float(s['contrast_factor']['value'])
+                st.session_state["min_island_size"] = int(s['min_island_size']['value'])
+                st.session_state["closing_radius"] = int(s['closing_radius']['value'])
+            st.session_state["apply_suggestions"] = False
+            st.rerun()
+
+        # Now, continue with normal widget rendering...
 
         # Get ROI coordinates
         roi_coords = st.session_state.roi_coords if st.session_state.roi_coords else None
@@ -630,8 +961,10 @@ if uploaded_file is not None:
 
             contrast_factor = st.slider(
                 "Contrast",
-                min_value=0.1, max_value=3.0, value=st.session_state.get("contrast_factor", 1.0),
-                step=0.01, key="contrast_factor"
+                min_value=0.1,
+                max_value=3.0,
+                step=0.01,
+                key="contrast_factor"
             )
 
             brightness = st.slider(
@@ -645,7 +978,7 @@ if uploaded_file is not None:
 
             threshold = st.slider(
                 "Binary Threshold",
-                min_value=0.0, max_value=1.0, value=st.session_state.get("threshold", 0.5),
+                min_value=0.0, max_value=1.0,
                 step=0.01, key="threshold"
             )
 
@@ -672,7 +1005,7 @@ if uploaded_file is not None:
 
             closing_radius = st.slider(
                 "Morphological Closing Radius",
-                min_value=0, max_value=10, value=st.session_state.get("closing_radius", 2),
+                min_value=0, max_value=10,
                 step=1, key="closing_radius"
             )
 
@@ -770,60 +1103,20 @@ if uploaded_file is not None:
 
                 plt.tight_layout()
                 st.pyplot(fig)
+                # Download button for processed images grid
+                _buf_processed = io.BytesIO()
+                fig.savefig(_buf_processed, format="png", dpi=300, bbox_inches="tight")
+                _buf_processed.seek(0)
+                st.download_button(
+                    label="⬇️ Download Processed Images Figure (PNG)",
+                    data=_buf_processed,
+                    file_name="processed_images_overview.png",
+                    mime="image/png"
+                )
 
-                # Processing summary
-                with st.expander("🔍 Processing Summary", expanded=False):
-                    stats = processed_roi['processing_stats']
-                    col1, col2, col3 = st.columns(3)
 
-                    with col1:
-                        st.metric("Islands Removed", stats['islands_removed'])
-                    with col2:
-                        st.metric("Pixels Removed", stats['pixels_removed'])
-                    with col3:
-                        st.metric("Final White Pixels", stats['final_white_pixels'])
 
-                    st.markdown("### Processing Parameters Used")
-                    st.json({
-                        "Basic Processing": {
-                            "contrast_factor": contrast_factor,
-                            "brightness": brightness,
-                            "threshold": threshold,
-                            "edge_side": edge_side
-                        },
-                        "Island Filtering": {
-                            "min_component_size": min_island_size,
-                            "remove_disconnected_islands": connectivity_check,
-                            "morphological_closing_radius": closing_radius,
-                            "use_main_structure_only": find_main_structure
-                        }
-                    })
 
-        with st.expander("🎯 Parameter Optimization Assistant", expanded=False):
-            st.markdown("### Automatic Parameter Suggestions")
-            if st.button("🔍 Analyze Image & Suggest Parameters"):
-                suggestions = suggest_processing_parameters(img_array, roi_coords)
-                st.session_state.suggestions = suggestions
-
-            if "suggestions" in st.session_state:
-                s = st.session_state.suggestions
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**Threshold:** {s['threshold']['value']:.3f}")
-                    st.markdown(f"*{s['threshold']['reasoning']}*")
-                    st.markdown(f"**Contrast Factor:** {s['contrast_factor']['value']:.2f}")
-                    st.markdown(f"*{s['contrast_factor']['reasoning']}*")
-                with col2:
-                    st.markdown(f"**Min Island Size:** {s['min_island_size']['value']}")
-                    st.markdown(f"*{s['min_island_size']['reasoning']}*")
-                    st.markdown(f"**Closing Radius:** {s['closing_radius']['value']}")
-                    st.markdown(f"*{s['closing_radius']['reasoning']}*")
-                if st.button("✨ Apply Suggested Parameters"):
-                    st.session_state["threshold"] = float(s['threshold']['value'])
-                    st.session_state["contrast_factor"] = float(s['contrast_factor']['value'])
-                    st.session_state["min_island_size"] = int(s['min_island_size']['value'])
-                    st.session_state["closing_radius"] = int(s['closing_radius']['value'])
-                    st.experimental_rerun()
 
     # === TAB 4: ANALYSIS RESULTS ===
     with tab4:
@@ -873,6 +1166,37 @@ if uploaded_file is not None:
                     # FFT analysis
                     fft_results = fft_analysis(metrics['autocorr'], scale_nm_per_px, min_period=10.0)
 
+                    physical_length = len(profile_nm) * scale_nm_per_px / 1000
+
+                    prompt_lines = [
+                        f"RMS roughness: {metrics['rms_roughness']:.2f} nm ± {metrics['d_rms_roughness']:.2f} nm",
+                        f"Correlation length: {metrics['corr_length_nm']:.2f} nm ± {metrics['d_corr_length_nm']:.2f} nm" if not np.isnan(
+                            metrics['corr_length_nm']) else "Correlation length: Not available",
+                        f"Dominant periodicity: {fft_results['dominant_period']:.1f} nm" if not np.isnan(
+                            fft_results['dominant_period']) else "Dominant periodicity: Not available",
+                        f"Profile points: {len(profile_nm)}",
+                        f"Profile analysis length: {physical_length:.2f} μm",
+                        "Context: This is sidewall profile roughness analysis from SEM images for microfabrication (etching)."
+                    ]
+                    prompt = "\n".join(prompt_lines)
+                    prompt += "\n\nPlease provide a concise, expert interpretation of these measurements, including what they mean about the fabrication quality, any likely causes for observed values, and any suggestions for improvement. Write your answer in English, suitable for a scientific report. Provide also a LaTeX code with the summary of the results, suitable for a scientific report"
+
+                    # --- UI logic ---
+                    st.markdown("---")
+                    st.markdown("## 🧠 AI-powered Interpretation and Suggestions")
+                    ai_model_default = "openai/gpt-oss-20b:free"
+                    st.caption(f"Model: {ai_model_default}")
+
+                    if st.button("🧠 Generate AI Report & Suggestions"):
+                        with st.spinner("Contacting AI assistant..."):
+                            _ai_model_name = ai_model_default
+                            ai_report = get_ai_interpretation(prompt, model=_ai_model_name)
+                            st.session_state["ai_report"] = ai_report
+                            st.session_state["ai_model_used"] = _ai_model_name
+
+                    if "ai_report" in st.session_state:
+                        st.success(st.session_state["ai_report"])
+
                     # Display results
                     st.markdown("### 📈 Results")
                     st.markdown(
@@ -886,7 +1210,6 @@ if uploaded_file is not None:
                         st.markdown(f"**Dominant Periodicity:** {fft_results['dominant_period']:.1f} nm")
 
                     st.markdown(f"**Profile Points:** {len(profile_nm)}")
-                    physical_length = len(profile_nm) * scale_nm_per_px / 1000
                     st.markdown(f"**Analysis Length:** {physical_length:.1f} μm")
 
             with col2:
@@ -927,46 +1250,30 @@ if uploaded_file is not None:
 
                     plt.tight_layout()
                     st.pyplot(fig)
+                    # Download button for analysis plots
+                    _buf_analysis = io.BytesIO()
+                    fig.savefig(_buf_analysis, format="png", dpi=300, bbox_inches="tight")
+                    _buf_analysis.seek(0)
+                    st.download_button(
+                        label="⬇️ Download Analysis Plots (PNG)",
+                        data=_buf_analysis,
+                        file_name="roughness_analysis_plots.png",
+                        mime="image/png"
+                    )
 
         else:
             st.markdown('<div class="warning-box">', unsafe_allow_html=True)
             st.markdown("""
-            ### ⚠️ Analysis Requirements
+                ### ⚠️ Analysis Requirements
 
-            To perform roughness analysis, please complete:
-            1. **Scale Calibration** (Tab 1) - Set the nm/pixel scale
-            2. **ROI Selection** (Tab 2) - Define analysis region  
-            3. **Image Processing** (Tab 3) - Extract edge profile
+                To perform roughness analysis, please complete:
+                1. **Scale Calibration** (Tab 1) - Set the nm/pixel scale
+                2. **ROI Selection** (Tab 2) - Define analysis region  
+                3. **Image Processing** (Tab 3) - Extract edge profile
 
-            Once all steps are complete, analysis results will appear here.
-            """)
+                Once all steps are complete, analysis results will appear here.
+                """)
             st.markdown('</div>', unsafe_allow_html=True)
-
-    # --- Prepare the prompt for the AI ---
-    prompt_lines = [
-        f"RMS roughness: {metrics['rms_roughness']:.2f} nm ± {metrics['d_rms_roughness']:.2f} nm",
-        f"Correlation length: {metrics['corr_length_nm']:.2f} nm ± {metrics['d_corr_length_nm']:.2f} nm" if not np.isnan(
-            metrics['corr_length_nm']) else "Correlation length: Not available",
-        f"Dominant periodicity: {fft_results['dominant_period']:.1f} nm" if not np.isnan(
-            fft_results['dominant_period']) else "Dominant periodicity: Not available",
-        f"Profile points: {len(profile_nm)}",
-        f"Profile analysis length: {physical_length:.2f} μm",
-        "Context: This is sidewall profile roughness analysis from SEM images for microfabrication (etching)."
-    ]
-    prompt = "\n".join(prompt_lines)
-    prompt += "\n\nPlease provide a concise, expert interpretation of these measurements, including what they mean about the fabrication quality, any likely causes for observed values, and any suggestions for improvement. Write your answer in English, suitable for a scientific report. Provide also a LaTeX code with the summary of the results, suitable for a scientific report"
-
-    # --- UI logic ---
-    st.markdown("---")
-    st.markdown("## 🧠 AI-powered Interpretation and Suggestions")
-
-    if st.button("🧠 Generate AI Report & Suggestions"):
-        with st.spinner("Contacting AI assistant..."):
-            ai_report = get_ai_interpretation(prompt, model="openai/gpt-oss-20b:free")  # Or try llama-3, claude-3, etc.
-            st.session_state["ai_report"] = ai_report
-
-    if "ai_report" in st.session_state:
-        st.success(st.session_state["ai_report"])
 
     # === TAB 5: EXPORT DATA ===
     with tab5:
@@ -1020,6 +1327,16 @@ Analysis Length: {physical_length:.1f} μm
 Resolution: ±{scale_nm_per_px:.2f} nm
 """
 
+                # Append AI recommendations if available
+                if "ai_report" in st.session_state and st.session_state["ai_report"]:
+                    results_text += """
+
+AI INTERPRETATION AND RECOMMENDATIONS
+------------------------------------
+""" + (
+                        (f"Model used: {st.session_state.get('ai_model_used', 'unknown')}\n\n") if st.session_state.get('ai_model_used') else ""
+                    ) + str(st.session_state["ai_report"]).strip() + "\n"
+
                 st.download_button(
                     label="📄 Download Full Report",
                     data=results_text,
@@ -1068,17 +1385,36 @@ Resolution: ±{scale_nm_per_px:.2f} nm
             col1, col2 = st.columns(2)
 
             with col1:
-                # Processed ROI images export
+                processed_roi = st.session_state.processed_roi_enhanced
                 if st.button("💾 Export Processed Images"):
-                    processed_roi = st.session_state.processed_roi
-
-                    # Save processed images
-                    from PIL import Image as PILImage
-                    import io
-
-                    # Create a zip-like structure (conceptually)
-                    st.success("✅ Processed images ready for download")
-                    st.info("Images include: Original ROI, Enhanced, Binary, and Edge-detected versions")
+                    # Save images to an in-memory ZIP
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+                        # Define images to export
+                        export_images = {
+                            "original_roi.png": processed_roi['roi_img'],
+                            "enhanced.png": (processed_roi['img_enhanced'] * 255).astype(np.uint8),
+                            "binary_raw.png": (processed_roi['img_binary_raw'] * 255).astype(np.uint8),
+                            "binary_cleaned.png": (processed_roi['img_binary'] * 255).astype(np.uint8),
+                            "removed_islands.png": (processed_roi['removed_islands'] * 255).astype(np.uint8),
+                        }
+                        for name, arr in export_images.items():
+                            # Convert grayscale arrays to RGB for PNG
+                            if arr.ndim == 2:
+                                img = PILImage.fromarray(arr)
+                            else:
+                                img = PILImage.fromarray(arr)
+                            img_bytes = io.BytesIO()
+                            img.save(img_bytes, format="PNG")
+                            img_bytes.seek(0)
+                            zip_file.writestr(name, img_bytes.read())
+                    zip_buffer.seek(0)
+                    st.download_button(
+                        label="⬇️ Download Processed Images (ZIP)",
+                        data=zip_buffer,
+                        file_name="processed_images.zip",
+                        mime="application/zip"
+                    )
 
             with col2:
                 # Session parameters export
@@ -1107,18 +1443,18 @@ Resolution: ±{scale_nm_per_px:.2f} nm
         else:
             st.markdown('<div class="info-box">', unsafe_allow_html=True)
             st.markdown("""
-            ### 📋 Export Options Available After Analysis
+                ### 📋 Export Options Available After Analysis
 
-            Complete the analysis workflow to access:
+                Complete the analysis workflow to access:
 
-            - **📄 Full Analysis Report** - Comprehensive text report with all metrics
-            - **📈 Profile Data** - Raw edge coordinates and deviation values (CSV)
-            - **🌊 FFT Data** - Spatial frequency analysis results (CSV)
-            - **💾 Processed Images** - All intermediate processing steps
-            - **⚙️ Analysis Parameters** - Session settings for reproducibility (JSON)
+                - **📄 Full Analysis Report** - Comprehensive text report with all metrics
+                - **📈 Profile Data** - Raw edge coordinates and deviation values (CSV)
+                - **🌊 FFT Data** - Spatial frequency analysis results (CSV)
+                - **💾 Processed Images** - All intermediate processing steps
+                - **⚙️ Analysis Parameters** - Session settings for reproducibility (JSON)
 
-            All exports include metadata and processing parameters for full traceability.
-            """)
+                All exports include metadata and processing parameters for full traceability.
+                """)
             st.markdown('</div>', unsafe_allow_html=True)
 
 else:
@@ -1181,54 +1517,54 @@ else:
 
     with col1:
         st.markdown("""
-        **📤 Step 1-2: Upload & Calibrate**
-        ```
-        📁 Upload SEM Image
-        ↓
-        📏 Set Reference Lines
-        ↓  
-        🎯 Calculate nm/pixel Scale
-        ```
-        """)
+            **📤 Step 1-2: Upload & Calibrate**
+            ```
+            📁 Upload SEM Image
+            ↓
+            📏 Set Reference Lines
+            ↓  
+            🎯 Calculate nm/pixel Scale
+            ```
+            """)
 
     with col2:
         st.markdown("""
-        **🎯 Step 3-4: Select & Process**
-        ```
-        🎨 Define ROI Region
-        ↓
-        🔧 Adjust Contrast/Threshold
-        ↓
-        📈 Extract Edge Profile  
-        ```
-        """)
+            **🎯 Step 3-4: Select & Process**
+            ```
+            🎨 Define ROI Region
+            ↓
+            🔧 Adjust Contrast/Threshold
+            ↓
+            📈 Extract Edge Profile  
+            ```
+            """)
 
     with col3:
         st.markdown("""
-        **📊 Step 5-6: Analyze & Export**
-        ```
-        🧮 Calculate Roughness Metrics
-        ↓
-        📊 Generate Visualizations
-        ↓
-        💾 Export Results & Data
-        ```
-        """)
+            **📊 Step 5-6: Analyze & Export**
+            ```
+            🧮 Calculate Roughness Metrics
+            ↓
+            📊 Generate Visualizations
+            ↓
+            💾 Export Results & Data
+            ```
+            """)
 
     st.markdown("---")
     st.markdown("""
-    ### 📸 Ready for Analysis
-    Upload your SEM image to begin the interactive roughness analysis workflow with ROI selection, 
-    scale calibration, and advanced processing controls.
-    """)
+        ### 📸 Ready for Analysis
+        Upload your SEM image to begin the interactive roughness analysis workflow with ROI selection, 
+        scale calibration, and advanced processing controls.
+        """)
 
 # Footer
 st.markdown("---")
 from datetime import datetime
+
 st.markdown(f"""
 <br><hr>
 <div style='text-align: center; color: #888888; font-size: 1rem;'>
 &copy; {datetime.now().year} Francesco Villasmunta &mdash; made with phlove <span style='font-size:1.2em;'>✨❤️</span>
 </div>
 """, unsafe_allow_html=True)
-
