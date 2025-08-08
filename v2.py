@@ -188,7 +188,7 @@ if 'known_distance' not in st.session_state:
 st.markdown('<div class="main-header">🔬 Advanced Sidewall Roughness Analysis</div>', unsafe_allow_html=True)
 
 # Introduction
-with st.expander("📖 Welcome to the Roughness Calculator! Learn More About This Tool", expanded=False):
+with st.expander("📖 Welcome to the Roughness Calculator! CLICK HERE to Learn More About This Tool", expanded=False):
     st.markdown("""
     **New Advanced Features:**
 
@@ -256,7 +256,7 @@ def get_ai_interpretation(prompt, model="openai/gpt-4o"):
             model=model,
             messages=[
                 {"role": "system",
-                 "content": "You are an expert scientific assistant who can analyze and comment on sidewall roughness measurement results, explaining their meaning and suggesting possible improvements or interpretations for research and engineering."},
+                 "content": "You are an expert scientific assistant who can analyze and comment on sidewall roughness measurement results, explaining their meaning and suggesting possible improvements or interpretations for research and engineering. You also provide a description of the results in LaTeX."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
