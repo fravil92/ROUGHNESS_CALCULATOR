@@ -18,6 +18,100 @@ import zipfile
 import io
 from PIL import Image as PILImage
 import base64
+import tempfile
+
+# Safe writable temp directory (e.g., for Cloud Run)
+TMP_DIR = tempfile.gettempdir()
+
+def get_temp_path(filename: str) -> str:
+    """Return an absolute path under the OS temp directory for safe writes."""
+    return os.path.join(TMP_DIR, filename)
+
+# === Cached helpers ===
+@st.cache_data(show_spinner=False)
+def load_image_from_path_cached(path: str) -> np.ndarray:
+    arr = np.array(Image.open(path))
+    return arr
+
+@st.cache_data(show_spinner=False)
+def load_image_from_bytes_cached(content: bytes) -> np.ndarray:
+    return np.array(Image.open(io.BytesIO(content)))
+
+@st.cache_data(show_spinner=True, max_entries=64, ttl=3600)
+def process_image_cached(
+    img_array: np.ndarray,
+    roi_coords,
+    contrast_factor: float,
+    brightness: float,
+    threshold: float,
+    min_island_size: int,
+    connectivity_check: bool,
+    closing_radius: int,
+    edge_side: str,
+    find_main_structure: bool,
+):
+    island_removal_params = {
+        'min_size': int(min_island_size),
+        'connectivity_check': bool(connectivity_check),
+    }
+    morphology_params = {'closing_radius': int(closing_radius)}
+    processed_roi = process_roi_image_enhanced(
+        img_array,
+        roi_coords,
+        float(contrast_factor),
+        float(brightness),
+        float(threshold),
+        island_removal_params,
+        morphology_params,
+    )
+    profile, y_coords = extract_edge_profile_from_roi_enhanced(
+        processed_roi,
+        edge_side,
+        find_main_structure,
+    )
+    return processed_roi, profile, y_coords
+
+@st.cache_data(show_spinner=True, max_entries=64, ttl=3600)
+def analyze_profile_cached(
+    profile_px: np.ndarray,
+    y_coords: np.ndarray,
+    detrend_method: str,
+    scale_nm_per_px: float,
+):
+    if detrend_method == "Mean Centering":
+        profile_detrended = profile_px - np.mean(profile_px)
+    elif detrend_method == "Linear Detrend":
+        from scipy import signal
+        profile_detrended = signal.detrend(profile_px, type='linear')
+    else:
+        if len(profile_px) > 3:
+            pfit = Polynomial.fit(y_coords, profile_px, 2)
+            profile_detrended = profile_px - pfit(y_coords)
+        else:
+            profile_detrended = profile_px - np.mean(profile_px)
+    profile_nm = profile_detrended * scale_nm_per_px
+    metrics = calculate_roughness_metrics(profile_nm, scale_nm_per_px)
+    if metrics:
+        fft_results = fft_analysis(metrics['autocorr'], scale_nm_per_px, min_period=10.0)
+    else:
+        fft_results = {
+            'spatial_periods': np.array([]),
+            'amplitudes': np.array([]),
+            'dominant_period': np.nan,
+            'peak_amplitude': np.nan,
+            'valid_mask': np.array([]),
+        }
+    physical_length = len(profile_nm) * scale_nm_per_px / 1000
+    return {
+        'profile_nm': profile_nm,
+        'metrics': metrics,
+        'fft_results': fft_results,
+        'physical_length': physical_length,
+    }
+
+@st.cache_resource
+def get_openrouter_client_cached(api_key: str):
+    return openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
 
 # Optional interactive canvas for dragging lines
 try:
@@ -155,11 +249,8 @@ def get_ai_interpretation(prompt, model="openai/gpt-4o"):
     api_key = st.secrets.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         return "OpenRouter API key not set! Please configure it in your secrets."
-    # Set OpenRouter endpoint
-    client = openai.OpenAI(
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1"
-    )
+    # Use cached OpenRouter client
+    client = get_openrouter_client_cached(api_key)
     try:
         response = client.chat.completions.create(
             model=model,
@@ -238,6 +329,133 @@ def create_scale_calibration_plot(img_array, line1_x=100, line2_x=200):
     ax.tick_params(axis='x', labelrotation=90)
 
     return fig, ax
+
+# --- Hot fragments (isolated reruns) ---
+@st.fragment
+def scale_calibration_fragment(img_array: np.ndarray, line1_x: int, line2_x: int):
+    fig, _ = create_scale_calibration_plot(img_array, line1_x, line2_x)
+    st.pyplot(fig)
+    _buf = io.BytesIO()
+    fig.savefig(_buf, format="png", dpi=300, bbox_inches="tight")
+    try:
+        fig.savefig(get_temp_path("scale_calibration.png"), format="png", dpi=300, bbox_inches="tight")
+    except Exception:
+        pass
+    _buf.seek(0)
+    st.download_button(
+        label="⬇️ Download Calibration Plot (PNG)",
+        data=_buf,
+        file_name="scale_calibration.png",
+        mime="image/png",
+    )
+
+@st.fragment
+def roi_preview_fragment(img_array: np.ndarray, roi_coords):
+    if roi_coords is None:
+        st.info("No ROI set")
+        return
+    x0, y0, x1, y1 = roi_coords
+    fig, ax = create_interactive_image_selector(img_array, "Image with Selected ROI")
+    rect = patches.Rectangle((x0, y0), x1 - x0, y1 - y0, linewidth=3, edgecolor='red', facecolor='none', alpha=0.8)
+    ax.add_patch(rect)
+    ax.text(x0 + 5, y0 + 15, 'ROI', color='red', fontsize=14,
+            fontweight='bold', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    st.pyplot(fig)
+    _buf = io.BytesIO()
+    fig.savefig(_buf, format="png", dpi=300, bbox_inches="tight")
+    try:
+        fig.savefig(get_temp_path("roi_preview.png"), format="png", dpi=300, bbox_inches="tight")
+    except Exception:
+        pass
+    _buf.seek(0)
+    st.download_button(
+        label="⬇️ Download ROI Preview (PNG)",
+        data=_buf,
+        file_name="roi_preview.png",
+        mime="image/png",
+    )
+
+@st.fragment
+def processed_images_fragment(processed_roi: dict, edge_profile: np.ndarray | None, edge_y_coords: np.ndarray | None):
+    if not processed_roi:
+        st.info("Nothing to show yet")
+        return
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    axes[0, 0].imshow(processed_roi['img_gray'], cmap='gray')
+    axes[0, 0].set_title('Original ROI (Grayscale)'); axes[0, 0].axis('off')
+    axes[0, 1].imshow(processed_roi['img_enhanced'], cmap='gray')
+    axes[0, 1].set_title('Enhanced (Contrast + Brightness)'); axes[0, 1].axis('off')
+    axes[0, 2].imshow(processed_roi['img_binary_raw'], cmap='gray')
+    axes[0, 2].set_title('Raw Binary (Before Island Removal)'); axes[0, 2].axis('off')
+    axes[1, 0].imshow(processed_roi['img_binary_raw'], cmap='gray', alpha=0.7)
+    if np.any(processed_roi['removed_islands']):
+        axes[1, 0].imshow(processed_roi['removed_islands'], cmap='Reds', alpha=0.8)
+        axes[1, 0].set_title(f"Removed Islands (Count: {processed_roi['processing_stats']['islands_removed']})")
+    else:
+        axes[1, 0].set_title('No Islands Removed')
+    axes[1, 0].axis('off')
+    axes[1, 1].imshow(processed_roi['img_binary'], cmap='gray')
+    axes[1, 1].set_title('Cleaned Binary (After Island Removal)'); axes[1, 1].axis('off')
+    axes[1, 2].imshow(processed_roi['img_binary'], cmap='gray')
+    if edge_profile is not None and edge_y_coords is not None:
+        axes[1, 2].plot(edge_profile, edge_y_coords, 'r-', linewidth=2)
+        axes[1, 2].set_title(f'Final Edge Profile ({len(edge_profile)} points)')
+    else:
+        axes[1, 2].set_title('No Edge Detected')
+    axes[1, 2].axis('off')
+    plt.tight_layout()
+    st.pyplot(fig)
+    _buf = io.BytesIO()
+    fig.savefig(_buf, format="png", dpi=300, bbox_inches="tight")
+    try:
+        fig.savefig(get_temp_path("processed_images_overview.png"), format="png", dpi=300, bbox_inches="tight")
+    except Exception:
+        pass
+    _buf.seek(0)
+    st.download_button(
+        label="⬇️ Download Processed Images Figure (PNG)",
+        data=_buf,
+        file_name="processed_images_overview.png",
+        mime="image/png"
+    )
+
+@st.fragment
+def analysis_plots_fragment(y_coords: np.ndarray, profile_nm: np.ndarray, metrics: dict, fft_results: dict, scale_nm_per_px: float, detrend_method: str):
+    fig, axes = plt.subplots(3, 1, figsize=(12, 12))
+    axes[0].plot(y_coords * scale_nm_per_px / 1000, profile_nm, 'b-', linewidth=1)
+    axes[0].set_xlabel('Distance (μm)'); axes[0].set_ylabel('Deviation (nm)')
+    axes[0].set_title(f'Sidewall Profile ({detrend_method})'); axes[0].grid(True, alpha=0.3)
+    axes[1].plot(metrics['lags_nm'], metrics['autocorr'], 'g-', linewidth=1)
+    if not np.isnan(metrics['corr_length_nm']):
+        axes[1].axvline(metrics['corr_length_nm'], color='r', linestyle='--',
+                        label=f"Correlation length = {metrics['corr_length_nm']:.1f} nm")
+    axes[1].axhline(1 / np.e, color='orange', linestyle=':', alpha=0.7, label='1/e threshold')
+    axes[1].set_xlabel('Lag (nm)'); axes[1].set_ylabel('Autocorrelation')
+    axes[1].set_title('Autocorrelation Function'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+    axes[2].plot(fft_results['spatial_periods'], fft_results['amplitudes'], 'purple', linewidth=1)
+    if not np.isnan(fft_results['dominant_period']):
+        axes[2].axvline(fft_results['dominant_period'], color='red', linestyle='--',
+                        label=f"Peak: {fft_results['dominant_period']:.1f} nm")
+    axes[2].set_xlabel('Spatial Period (nm)'); axes[2].set_ylabel('FFT Amplitude')
+    axes[2].set_title('Spatial Frequency Analysis')
+    if len(fft_results['spatial_periods']) > 0:
+        axes[2].set_xlim([0, min(150000, np.max(fft_results['spatial_periods']))])
+    axes[2].legend(); axes[2].grid(True, alpha=0.3)
+    plt.tight_layout()
+    st.pyplot(fig)
+    _buf = io.BytesIO()
+    fig.savefig(_buf, format="png", dpi=300, bbox_inches="tight")
+    try:
+        fig.savefig(get_temp_path("roughness_analysis_plots.png"), format="png", dpi=300, bbox_inches="tight")
+    except Exception:
+        pass
+    _buf.seek(0)
+    st.download_button(
+        label="⬇️ Download Analysis Plots (PNG)",
+        data=_buf,
+        file_name="roughness_analysis_plots.png",
+        mime="image/png"
+    )
 
 
 def set_roi(x0, y0, x1, y1):
@@ -658,6 +876,8 @@ if uploaded_file is not None:
                 st.markdown(f"**Pixel Distance:** {pixel_distance} pixels")
 
                 scale_nm_per_px = calculated_scale
+                # Persist scale for use in other tabs without relying on locals()
+                st.session_state["scale_nm_per_px"] = float(scale_nm_per_px)
 
                 st.markdown("---")
                 st.markdown("### 📊 Scale Information")
@@ -667,21 +887,12 @@ if uploaded_file is not None:
                 st.markdown(f"**Physical Height:** {st.session_state.image_height * calculated_scale / 1000:.1f} μm")
             else:
                 scale_nm_per_px = 11.11
+                st.session_state["scale_nm_per_px"] = float(scale_nm_per_px)
                 st.warning("Please set different X coordinates for the reference lines.")
 
         # Show the visualization on the left
         with col1:
-            scale_fig, scale_ax = create_scale_calibration_plot(img_array, line1_x, line2_x)
-            st.pyplot(scale_fig)
-            _buf_scale = io.BytesIO()
-            scale_fig.savefig(_buf_scale, format="png", dpi=300, bbox_inches="tight")
-            _buf_scale.seek(0)
-            st.download_button(
-                label="⬇️ Download Calibration Plot (PNG)",
-                data=_buf_scale,
-                file_name="scale_calibration.png",
-                mime="image/png",
-            )
+            scale_calibration_fragment(img_array, line1_x, line2_x)
 
     # === TAB 2: ROI SELECTION ===
     with tab2:
@@ -851,30 +1062,7 @@ if uploaded_file is not None:
             st.session_state.roi_coords = roi_coords
 
             # Create ROI visualization
-            roi_fig, roi_ax = create_interactive_image_selector(img_array, "Image with Selected ROI")
-
-            # Add ROI rectangle
-            rect = patches.Rectangle(
-                (roi_x0, roi_y0), roi_x1 - roi_x0, roi_y1 - roi_y0,
-                linewidth=3, edgecolor='red', facecolor='none', alpha=0.8
-            )
-            roi_ax.add_patch(rect)
-
-            # Add ROI label
-            roi_ax.text(roi_x0 + 5, roi_y0 + 15, 'ROI', color='red', fontsize=14,
-                        fontweight='bold', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-            st.pyplot(roi_fig)
-            # Download button for the ROI visualization
-            _buf_roi = io.BytesIO()
-            roi_fig.savefig(_buf_roi, format="png", dpi=300, bbox_inches="tight")
-            _buf_roi.seek(0)
-            st.download_button(
-                label="⬇️ Download ROI Preview (PNG)",
-                data=_buf_roi,
-                file_name="roi_preview.png",
-                mime="image/png"
-            )
+            roi_preview_fragment(img_array, roi_coords)
 
         with col2:
             # ROI info
@@ -957,94 +1145,87 @@ if uploaded_file is not None:
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            st.markdown("### Basic Processing Controls")
+            with st.form("processing_params"):
+                st.markdown("### Basic Processing Controls")
 
-            contrast_factor = st.slider(
-                "Contrast",
-                min_value=0.1,
-                max_value=3.0,
-                step=0.01,
-                key="contrast_factor"
-            )
+                contrast_factor = st.slider(
+                    "Contrast",
+                    min_value=0.1,
+                    max_value=3.0,
+                    step=0.01,
+                    key="contrast_factor"
+                )
 
-            brightness = st.slider(
-                "Brightness",
-                min_value=-0.5,
-                max_value=0.5,
-                value=0.0,
-                step=0.01,
-                help="Adjust image brightness"
-            )
+                brightness = st.slider(
+                    "Brightness",
+                    min_value=-0.5,
+                    max_value=0.5,
+                    value=0.0,
+                    step=0.01,
+                    help="Adjust image brightness",
+                    key="brightness"
+                )
 
-            threshold = st.slider(
-                "Binary Threshold",
-                min_value=0.0, max_value=1.0,
-                step=0.01, key="threshold"
-            )
+                threshold = st.slider(
+                    "Binary Threshold",
+                    min_value=0.0, max_value=1.0,
+                    step=0.01, key="threshold"
+                )
 
-            edge_side = st.selectbox(
-                "Edge to Extract",
-                ["right", "left", "center"],
-                index=0,
-                help="Which edge of the white region to extract"
-            )
+                edge_side = st.selectbox(
+                    "Edge to Extract",
+                    ["right", "left", "center"],
+                    index=0,
+                    help="Which edge of the white region to extract",
+                    key="edge_side"
+                )
 
-            st.markdown("---")
-            st.markdown("### 🏝️ Island Filtering Controls")
+                st.markdown("---")
+                st.markdown("### 🏝️ Island Filtering Controls")
 
-            min_island_size = st.slider(
-                "Minimum Component Size",
-                min_value=10, max_value=500, value=st.session_state.get("min_island_size", 50),
-                step=1, key="min_island_size"
-            )
-            connectivity_check = st.checkbox(
-                "Remove Edge-Disconnected Islands",
-                value=True,
-                help="Remove white regions that don't connect to image edges"
-            )
+                min_island_size = st.slider(
+                    "Minimum Component Size",
+                    min_value=10, max_value=500, value=st.session_state.get("min_island_size", 50),
+                    step=1, key="min_island_size"
+                )
+                connectivity_check = st.checkbox(
+                    "Remove Edge-Disconnected Islands",
+                    value=True,
+                    help="Remove white regions that don't connect to image edges",
+                    key="connectivity_check"
+                )
 
-            closing_radius = st.slider(
-                "Morphological Closing Radius",
-                min_value=0, max_value=10,
-                step=1, key="closing_radius"
-            )
+                closing_radius = st.slider(
+                    "Morphological Closing Radius",
+                    min_value=0, max_value=10,
+                    step=1, key="closing_radius"
+                )
 
-            find_main_structure = st.checkbox(
-                "Use Main Structure Only",
-                value=True,
-                help="Extract edge from the largest/most relevant structure only"
-            )
+                find_main_structure = st.checkbox(
+                    "Use Main Structure Only",
+                    value=True,
+                    help="Extract edge from the largest/most relevant structure only",
+                    key="find_main_structure"
+                )
 
-            process_button = st.button("🔄 Process ROI with Island Filtering", type="primary")
+                submitted_processing = st.form_submit_button("🔄 Apply & Process ROI")
 
         with col2:
-            # Run the enhanced processing either on button click or if not yet in session_state
-            if process_button or 'processed_roi_enhanced' not in st.session_state:
-                island_removal_params = {
-                    'min_size': min_island_size,
-                    'connectivity_check': connectivity_check
-                }
-
-                morphology_params = {
-                    'closing_radius': closing_radius
-                }
-
-                processed_roi = process_roi_image_enhanced(
-                    img_array,
-                    roi_coords,
-                    contrast_factor,
-                    brightness,
-                    threshold,
-                    island_removal_params,
-                    morphology_params
+            # Execute processing only when the form is submitted
+            if submitted_processing:
+                processed_roi, profile, y_coords = process_image_cached(
+                    img_array=img_array,
+                    roi_coords=roi_coords,
+                    contrast_factor=st.session_state.get('contrast_factor', 1.0),
+                    brightness=st.session_state.get('brightness', 0.0),
+                    threshold=st.session_state.get('threshold', 0.5),
+                    min_island_size=st.session_state.get('min_island_size', 50),
+                    connectivity_check=st.session_state.get('connectivity_check', True),
+                    closing_radius=st.session_state.get('closing_radius', 2),
+                    edge_side=st.session_state.get('edge_side', 'right'),
+                    find_main_structure=st.session_state.get('find_main_structure', True),
                 )
                 st.session_state.processed_roi_enhanced = processed_roi
-
-                profile, y_coords = extract_edge_profile_from_roi_enhanced(
-                    processed_roi,
-                    edge_side,
-                    find_main_structure
-                )
 
                 if profile is not None:
                     st.session_state.edge_profile = profile
@@ -1065,54 +1246,13 @@ if uploaded_file is not None:
             # Display processed images
             if 'processed_roi_enhanced' in st.session_state:
                 processed_roi = st.session_state.processed_roi_enhanced
-
-                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-
-                axes[0, 0].imshow(processed_roi['img_gray'], cmap='gray')
-                axes[0, 0].set_title('Original ROI (Grayscale)')
-                axes[0, 0].axis('off')
-
-                axes[0, 1].imshow(processed_roi['img_enhanced'], cmap='gray')
-                axes[0, 1].set_title('Enhanced (Contrast + Brightness)')
-                axes[0, 1].axis('off')
-
-                axes[0, 2].imshow(processed_roi['img_binary_raw'], cmap='gray')
-                axes[0, 2].set_title('Raw Binary (Before Island Removal)')
-                axes[0, 2].axis('off')
-
-                axes[1, 0].imshow(processed_roi['img_binary_raw'], cmap='gray', alpha=0.7)
-                if np.any(processed_roi['removed_islands']):
-                    axes[1, 0].imshow(processed_roi['removed_islands'], cmap='Reds', alpha=0.8)
-                    axes[1, 0].set_title(
-                        f'Removed Islands (Count: {processed_roi["processing_stats"]["islands_removed"]})')
-                else:
-                    axes[1, 0].set_title('No Islands Removed')
-                axes[1, 0].axis('off')
-
-                axes[1, 1].imshow(processed_roi['img_binary'], cmap='gray')
-                axes[1, 1].set_title('Cleaned Binary (After Island Removal)')
-                axes[1, 1].axis('off')
-
-                axes[1, 2].imshow(processed_roi['img_binary'], cmap='gray')
-                if hasattr(st.session_state, 'edge_profile') and st.session_state.edge_profile is not None:
-                    axes[1, 2].plot(st.session_state.edge_profile, st.session_state.edge_y_coords, 'r-', linewidth=2)
-                    axes[1, 2].set_title(f'Final Edge Profile ({len(st.session_state.edge_profile)} points)')
-                else:
-                    axes[1, 2].set_title('No Edge Detected')
-                axes[1, 2].axis('off')
-
-                plt.tight_layout()
-                st.pyplot(fig)
-                # Download button for processed images grid
-                _buf_processed = io.BytesIO()
-                fig.savefig(_buf_processed, format="png", dpi=300, bbox_inches="tight")
-                _buf_processed.seek(0)
-                st.download_button(
-                    label="⬇️ Download Processed Images Figure (PNG)",
-                    data=_buf_processed,
-                    file_name="processed_images_overview.png",
-                    mime="image/png"
+                processed_images_fragment(
+                    processed_roi,
+                    st.session_state.get('edge_profile', None),
+                    st.session_state.get('edge_y_coords', None),
                 )
+            else:
+                st.info("Adjust parameters and click 'Apply & Process ROI' to run processing.")
 
 
 
@@ -1124,49 +1264,52 @@ if uploaded_file is not None:
 
         if (hasattr(st.session_state, 'edge_profile') and
                 st.session_state.edge_profile is not None and
-                'scale_nm_per_px' in locals()):
+                'scale_nm_per_px' in st.session_state):
 
             # Get edge profile
             profile_px = st.session_state.edge_profile
             y_coords = st.session_state.edge_y_coords
+            scale_nm_per_px = st.session_state.get("scale_nm_per_px", 11.11)
 
             # Detrending options
             col1, col2 = st.columns([1, 3])
 
             with col1:
-                st.markdown("### Detrending Options")
+                with st.form("analysis_params"):
+                    st.markdown("### Detrending Options")
 
-                detrend_method = st.selectbox(
-                    "Detrending Method",
-                    ["Mean Centering", "Linear Detrend", "Parabolic Detrend"],
-                    index=2
-                )
+                    detrend_method = st.selectbox(
+                        "Detrending Method",
+                        ["Mean Centering", "Linear Detrend", "Parabolic Detrend"],
+                        index=2,
+                        key="detrend_method"
+                    )
 
-                # Apply detrending
-                if detrend_method == "Mean Centering":
-                    profile_detrended = profile_px - np.mean(profile_px)
-                elif detrend_method == "Linear Detrend":
-                    from scipy import signal
+                    submitted_analysis = st.form_submit_button("📊 Calculate Roughness Metrics")
 
-                    profile_detrended = signal.detrend(profile_px, type='linear')
-                else:  # Parabolic
-                    if len(profile_px) > 3:
-                        pfit = Polynomial.fit(y_coords, profile_px, 2)
-                        profile_detrended = profile_px - pfit(y_coords)
-                    else:
-                        profile_detrended = profile_px - np.mean(profile_px)
+                # Execute analysis only when form is submitted
+                if submitted_analysis:
+                    # Run cached analysis
+                    analysis = analyze_profile_cached(
+                        profile_px=profile_px,
+                        y_coords=y_coords,
+                        detrend_method=st.session_state.get('detrend_method', 'Parabolic Detrend'),
+                        scale_nm_per_px=scale_nm_per_px,
+                    )
 
-                # Convert to nm
-                profile_nm = profile_detrended * scale_nm_per_px
+                    metrics = analysis['metrics']
+                    fft_results = analysis['fft_results']
+                    profile_nm = analysis['profile_nm']
+                    physical_length = analysis['physical_length']
 
-                # Calculate metrics
-                metrics = calculate_roughness_metrics(profile_nm, scale_nm_per_px)
-
-                if metrics:
-                    # FFT analysis
-                    fft_results = fft_analysis(metrics['autocorr'], scale_nm_per_px, min_period=10.0)
-
-                    physical_length = len(profile_nm) * scale_nm_per_px / 1000
+                    # Store results in session_state for export
+                    st.session_state["analysis_results"] = {
+                        "profile_nm": profile_nm,
+                        "metrics": metrics,
+                        "fft_results": fft_results,
+                        "physical_length": physical_length,
+                        "detrend_method": st.session_state.get('detrend_method', 'Parabolic Detrend')
+                    }
 
                     prompt_lines = [
                         f"RMS roughness: {metrics['rms_roughness']:.2f} nm ± {metrics['d_rms_roughness']:.2f} nm",
@@ -1212,54 +1355,76 @@ if uploaded_file is not None:
                     st.markdown(f"**Profile Points:** {len(profile_nm)}")
                     st.markdown(f"**Analysis Length:** {physical_length:.1f} μm")
 
-            with col2:
-                if metrics:
-                    # Create analysis plots
-                    fig, axes = plt.subplots(3, 1, figsize=(12, 12))
+                elif "analysis_results" in st.session_state:
+                    # Display previously computed results
+                    results = st.session_state["analysis_results"]
+                    metrics = results["metrics"]
+                    fft_results = results["fft_results"]
+                    profile_nm = results["profile_nm"]
+                    physical_length = results["physical_length"]
 
-                    # Profile plot
-                    axes[0].plot(y_coords * scale_nm_per_px / 1000, profile_nm, 'b-', linewidth=1)
-                    axes[0].set_xlabel('Distance (μm)')
-                    axes[0].set_ylabel('Deviation (nm)')
-                    axes[0].set_title(f'Sidewall Profile ({detrend_method})')
-                    axes[0].grid(True, alpha=0.3)
+                    st.markdown("### 📈 Results")
+                    st.markdown(
+                        f"**RMS Roughness:** {metrics['rms_roughness']:.2f} ± {metrics['d_rms_roughness']:.2f} nm")
 
-                    # Autocorrelation plot
-                    axes[1].plot(metrics['lags_nm'], metrics['autocorr'], 'g-', linewidth=1)
                     if not np.isnan(metrics['corr_length_nm']):
-                        axes[1].axvline(metrics['corr_length_nm'], color='r', linestyle='--',
-                                        label=f'Correlation length = {metrics["corr_length_nm"]:.1f} nm')
-                    axes[1].axhline(1 / np.e, color='orange', linestyle=':', alpha=0.7, label='1/e threshold')
-                    axes[1].set_xlabel('Lag (nm)')
-                    axes[1].set_ylabel('Autocorrelation')
-                    axes[1].set_title('Autocorrelation Function')
-                    axes[1].legend()
-                    axes[1].grid(True, alpha=0.3)
+                        st.markdown(
+                            f"**Correlation Length:** {metrics['corr_length_nm']:.2f} ± {metrics['d_corr_length_nm']:.2f} nm")
 
-                    # FFT plot
-                    axes[2].plot(fft_results['spatial_periods'], fft_results['amplitudes'], 'purple', linewidth=1)
                     if not np.isnan(fft_results['dominant_period']):
-                        axes[2].axvline(fft_results['dominant_period'], color='red', linestyle='--',
-                                        label=f'Peak: {fft_results["dominant_period"]:.1f} nm')
-                    axes[2].set_xlabel('Spatial Period (nm)')
-                    axes[2].set_ylabel('FFT Amplitude')
-                    axes[2].set_title('Spatial Frequency Analysis')
-                    axes[2].set_xlim([0, min(150000, np.max(fft_results['spatial_periods']))])
-                    axes[2].legend()
-                    axes[2].grid(True, alpha=0.3)
+                        st.markdown(f"**Dominant Periodicity:** {fft_results['dominant_period']:.1f} nm")
 
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    # Download button for analysis plots
-                    _buf_analysis = io.BytesIO()
-                    fig.savefig(_buf_analysis, format="png", dpi=300, bbox_inches="tight")
-                    _buf_analysis.seek(0)
-                    st.download_button(
-                        label="⬇️ Download Analysis Plots (PNG)",
-                        data=_buf_analysis,
-                        file_name="roughness_analysis_plots.png",
-                        mime="image/png"
+                    st.markdown(f"**Profile Points:** {len(profile_nm)}")
+                    st.markdown(f"**Analysis Length:** {physical_length:.1f} μm")
+
+                    # AI section
+                    st.markdown("---")
+                    st.markdown("## 🧠 AI-powered Interpretation and Suggestions")
+                    ai_model_default = "openai/gpt-oss-20b:free"
+                    st.caption(f"Model: {ai_model_default}")
+
+                    if st.button("🧠 Generate AI Report & Suggestions"):
+                        prompt_lines = [
+                            f"RMS roughness: {metrics['rms_roughness']:.2f} nm ± {metrics['d_rms_roughness']:.2f} nm",
+                            f"Correlation length: {metrics['corr_length_nm']:.2f} nm ± {metrics['d_corr_length_nm']:.2f} nm" if not np.isnan(
+                                metrics['corr_length_nm']) else "Correlation length: Not available",
+                            f"Dominant periodicity: {fft_results['dominant_period']:.1f} nm" if not np.isnan(
+                                fft_results['dominant_period']) else "Dominant periodicity: Not available",
+                            f"Profile points: {len(profile_nm)}",
+                            f"Profile analysis length: {physical_length:.2f} μm",
+                            "Context: This is sidewall profile roughness analysis from SEM images for microfabrication (etching)."
+                        ]
+                        prompt = "\n".join(prompt_lines)
+                        prompt += "\n\nPlease provide a concise, expert interpretation of these measurements, including what they mean about the fabrication quality, any likely causes for observed values, and any suggestions for improvement. Write your answer in English, suitable for a scientific report. Provide also a LaTeX code with the summary of the results, suitable for a scientific report"
+
+                        with st.spinner("Contacting AI assistant..."):
+                            _ai_model_name = ai_model_default
+                            ai_report = get_ai_interpretation(prompt, model=_ai_model_name)
+                            st.session_state["ai_report"] = ai_report
+                            st.session_state["ai_model_used"] = _ai_model_name
+
+                    if "ai_report" in st.session_state:
+                        st.success(st.session_state["ai_report"])
+
+            with col2:
+                if "analysis_results" in st.session_state:
+                    results = st.session_state["analysis_results"]
+                    metrics = results["metrics"]
+                    fft_results = results["fft_results"]
+                    profile_nm = results["profile_nm"]
+                    physical_length = results["physical_length"]
+                    detrend_method = results["detrend_method"]
+
+                    analysis_plots_fragment(
+                        y_coords=y_coords,
+                        profile_nm=profile_nm,
+                        metrics=metrics,
+                        fft_results=fft_results,
+                        scale_nm_per_px=scale_nm_per_px,
+                        detrend_method=detrend_method,
                     )
+                else:
+                    st.info("Select detrending method and click 'Calculate Roughness Metrics' to run analysis.")
 
         else:
             st.markdown('<div class="warning-box">', unsafe_allow_html=True)
@@ -1286,12 +1451,28 @@ if uploaded_file is not None:
 
         if (hasattr(st.session_state, 'edge_profile') and
                 st.session_state.edge_profile is not None and
-                'scale_nm_per_px' in locals() and
-                'metrics' in locals()):
+                'scale_nm_per_px' in st.session_state and
+                'analysis_results' in st.session_state):
 
             col1, col2, col3 = st.columns(3)
 
             with col1:
+                # Get data from session_state
+                scale_nm_per_px = st.session_state.get("scale_nm_per_px", 11.11)
+                results = st.session_state["analysis_results"]
+                metrics = results["metrics"]
+                fft_results = results["fft_results"]
+                profile_nm = results["profile_nm"]
+                physical_length = results["physical_length"]
+                detrend_method = results["detrend_method"]
+                
+                # Get ROI info
+                roi_coords = st.session_state.roi_coords
+                roi_width = roi_coords[2] - roi_coords[0] if roi_coords else 0
+                roi_height = roi_coords[3] - roi_coords[1] if roi_coords else 0
+                physical_width = roi_width * scale_nm_per_px / 1000
+                physical_height = roi_height * scale_nm_per_px / 1000
+
                 # Analysis report
                 results_text = f"""Advanced Sidewall Roughness Analysis Report
 ================================================
@@ -1304,15 +1485,15 @@ Scale: {scale_nm_per_px:.3f} nm/pixel
 Reference Distance: {st.session_state.known_distance:.1f} nm
 
 ROI PARAMETERS:
-ROI Coordinates: {st.session_state.roi_coords}
+ROI Coordinates: {roi_coords}
 ROI Size: {roi_width} × {roi_height} pixels
 Physical ROI Size: {physical_width:.1f} × {physical_height:.1f} μm
 
 PROCESSING PARAMETERS:
-Contrast Factor: {contrast_factor}
-Brightness Offset: {brightness}
-Binary Threshold: {threshold}
-Edge Side: {edge_side}
+Contrast Factor: {st.session_state.get('contrast_factor', 1.0)}
+Brightness Offset: {st.session_state.get('brightness', 0.0)}
+Binary Threshold: {st.session_state.get('threshold', 0.5)}
+Edge Side: {st.session_state.get('edge_side', 'right')}
 Detrending: {detrend_method}
 
 ROUGHNESS METRICS:
@@ -1349,7 +1530,7 @@ AI INTERPRETATION AND RECOMMENDATIONS
                 profile_data = np.column_stack([
                     st.session_state.edge_y_coords,
                     st.session_state.edge_profile,
-                    profile_nm
+                    results["profile_nm"]
                 ])
                 profile_csv = "y_pixels,edge_pixels,deviation_nm\n"
                 for row in profile_data:
@@ -1365,8 +1546,8 @@ AI INTERPRETATION AND RECOMMENDATIONS
             with col3:
                 # FFT data
                 fft_data = np.column_stack([
-                    fft_results['spatial_periods'],
-                    fft_results['amplitudes']
+                    results["fft_results"]['spatial_periods'],
+                    results["fft_results"]['amplitudes']
                 ])
                 fft_csv = "spatial_period_nm,amplitude\n"
                 for row in fft_data:
@@ -1421,10 +1602,10 @@ AI INTERPRETATION AND RECOMMENDATIONS
                 session_params = {
                     'scale_nm_per_px': scale_nm_per_px,
                     'roi_coords': st.session_state.roi_coords,
-                    'contrast_factor': contrast_factor,
-                    'brightness': brightness,
-                    'threshold': threshold,
-                    'edge_side': edge_side,
+                    'contrast_factor': st.session_state.get('contrast_factor', 1.0),
+                    'brightness': st.session_state.get('brightness', 0.0),
+                    'threshold': st.session_state.get('threshold', 0.5),
+                    'edge_side': st.session_state.get('edge_side', 'right'),
                     'detrend_method': detrend_method,
                     'known_distance': st.session_state.known_distance
                 }
@@ -1550,21 +1731,3 @@ else:
             💾 Export Results & Data
             ```
             """)
-
-    st.markdown("---")
-    st.markdown("""
-        ### 📸 Ready for Analysis
-        Upload your SEM image to begin the interactive roughness analysis workflow with ROI selection, 
-        scale calibration, and advanced processing controls.
-        """)
-
-# Footer
-st.markdown("---")
-from datetime import datetime
-
-st.markdown(f"""
-<br><hr>
-<div style='text-align: center; color: #888888; font-size: 1rem;'>
-&copy; {datetime.now().year} Francesco Villasmunta &mdash; made with phlove <span style='font-size:1.2em;'>✨❤️</span>
-</div>
-""", unsafe_allow_html=True)
