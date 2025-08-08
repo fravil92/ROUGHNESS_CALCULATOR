@@ -185,7 +185,7 @@ if 'known_distance' not in st.session_state:
     st.session_state.known_distance = 100.0
 
 # Title
-st.markdown('<div class="main-header">🔬 Advanced Sidewall Roughness Analysis</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🔬 Advanced Sidewall Roughness Analysis/Edge Profile Extractor</div>', unsafe_allow_html=True)
 
 # Introduction
 with st.expander("📖 Welcome to the Roughness Calculator! CLICK HERE to Learn More About This Tool", expanded=False):
