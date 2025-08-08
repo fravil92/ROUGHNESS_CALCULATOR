@@ -722,7 +722,7 @@ if uploaded_file is not None:
         with col1:
             if HAS_DRAWABLE_CANVAS:
                 st.markdown("### Drag the reference lines")
-                enable_drag = st.checkbox("Enable interactive dragging", value=True, key="enable_drag_calibration")
+                enable_drag = st.checkbox("Enable interactive dragging (->Click APPLY POSITIONS below!)", value=True, key="enable_drag_calibration")
                 if enable_drag:
                     img_width = st.session_state.image_width
                     img_height = st.session_state.image_height
@@ -906,7 +906,7 @@ if uploaded_file is not None:
             if HAS_DRAWABLE_CANVAS:
                 st.markdown("### Drag the ROI on the image")
                 st.caption("Tip: drag and modify the size of the red area directly on the picture.")
-                enable_drag_roi = st.checkbox("Enable interactive ROI dragging", value=st.session_state.get("enable_drag_roi", True), key="enable_drag_roi")
+                enable_drag_roi = st.checkbox("Enable interactive ROI dragging (-> Then Click APPLY ROI below!)", value=st.session_state.get("enable_drag_roi", True), key="enable_drag_roi")
                 # Ensure a canvas version to force refresh when needed
                 if "roi_canvas_version" not in st.session_state:
                     st.session_state["roi_canvas_version"] = 0
