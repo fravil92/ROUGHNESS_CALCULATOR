@@ -1740,6 +1740,6 @@ from datetime import datetime
 st.markdown(f"""
 <br><hr>
 <div style='text-align: center; color: #888888; font-size: 1rem;'>
-&copy; {datetime.now().year} Francesco Villasmunta &mdash; made with phlove <span style='font-size:1.2em;'>✨❤️</span>
+&copy; {datetime.now().year} Francesco Villasmunta &mdash; made with phlove <span style='font-size:1.2em;'>✨</span>
 </div>
 """, unsafe_allow_html=True)
