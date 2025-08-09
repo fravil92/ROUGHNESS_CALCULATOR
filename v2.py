@@ -1740,10 +1740,11 @@ from datetime import datetime
 st.markdown(f"""
 <br><hr>
 <div style='text-align: center; color: #888888; font-size: 1rem;'>
-&copy; {datetime.now().year} © 2025 Francesco Villasmunta —
-  <a href="https://www.linkedin.com/in/francescovillasmunta/" target="_blank">LinkedIn</a> &mdash; made with phlove <span style='font-size:1.2em;'>✨</span>
+&copy; {datetime.now().year} Francesco Villasmunta —
+<a href="https://www.linkedin.com/in/francescovillasmunta/" target="_blank" style="color: #0A66C2; text-decoration: none;">LinkedIn</a> &mdash; made with phlove <span style='font-size:1.2em;'>✨</span>
 </div>
 """, unsafe_allow_html=True)
+
   
 
 
